@@ -1,0 +1,522 @@
+---
+title: "DxD"
+author: "Julia Bloom"
+date: "January 22, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(ggmap)
+
+setwd("C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Raw")
+```
+
+
+
+## 311 Complaint Data
+
+Reading in dataset
+```{r, eval=FALSE}
+complaint_raw <- read.csv("311_Service_Requests_from_2010_to_Present_Dec18toDec20.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+# Should be 5,212,242 obs
+```
+
+```{r}
+head(complaint_raw)
+```
+
+
+Filtering only noise-related complaints
+```{r}
+complaint_raw$Created.Date <- as.character(complaint_raw$Created.Date)
+
+# Dataset represents all complaints that could possibly be related to noise, tha talso have location information and date information
+complaint_1 <- complaint_raw %>%
+  filter(Complaint.Type=="Noise" | Complaint.Type=="Noise - Street/Sidewalk"| Complaint.Type=="Noise - Residential"| Complaint.Type=="Noise - Commercial"| Complaint.Type=="Noise - Park"| Complaint.Type=="Noise - Vehicle" | Complaint.Type=="Collection Truck Noise"| Complaint.Type=="Noise - House of Worship"| Complaint.Type=="Noise - Helicopter"| Complaint.Type=="Unsanitary Pigeon Condition"| Complaint.Type=="Rodent") %>%
+  select(Created.Date, Complaint.Type, Descriptor, Location.Type, Borough, Latitude, Longitude) %>%
+  drop_na(Latitude) %>%
+  drop_na(Created.Date) %>%
+  separate(col = Created.Date, into = c("complaint_date", "complaint_time", "complaint_AMPM"), sep = "[ ]")
+
+complaint_1$complaint_date <- as.Date(complaint_1$complaint_date, "%m/%d/%Y")
+# Should be 1,374,393 obs and 9 vars
+```
+
+Filtering out complaints before 2019 and after 2021 and converting dates
+```{r}
+# Dataset represents complaints filed after Jan 1 2019 and before Jan 1 2021
+complaint_clean <- complaint_1 %>% 
+  filter(complaint_date >= as.Date("2019-01-01")) %>%
+  filter(complaint_date < as.Date("2021-01-01"))
+# Should be 1,326,009 obs
+```
+
+```{r}
+head(complaint_clean)
+```
+
+
+
+## Dept of Building Permits
+
+Reading in the dataset
+```{r, eval=FALSE}
+# All "NULL" columns are ones I am sure we will not use
+dob_raw <- read.csv("DOB_Permit_Issuance.csv", encoding="UTF-8", na.strings = "", row.names = NULL, colClasses=c(NA, "NULL", NA, NA, "NULL", "NULL", NA, "NULL", "NULL", "NULL", "NULL", NA, NA, NA, "NULL", "NULL", NA, NA, NA, NA, NA, NA, "NULL", "NULL", NA, NA, NA, NA, "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", NA, NA, "NULL", "NULL", "NULL"))
+# Should be 3,720,041 obs
+```
+
+```{r}
+head(dob_raw)
+```
+
+Filtering out permits that are in process
+```{r}
+# Each row in dataset is a permit that is not in process
+dob_1 <- dob_raw %>%
+  filter(Permit.Status != "IN PROCESS") %>%
+  mutate(state = "NY") %>%
+  unite(Address, House.., Street.Name, BOROUGH, state, Zip.Code, sep = ",", remove = FALSE)
+
+dob_1$Filing.Date <- as.Date(as.character(dob_1$Filing.Date), "%m/%d/%Y")
+dob_1$Issuance.Date <- as.Date(as.character(dob_1$Issuance.Date), "%m/%d/%Y")
+dob_1$Expiration.Date <- as.Date(as.character(dob_1$Expiration.Date), "%m/%d/%Y")
+dob_1$Job.Start.Date <- as.Date(as.character(dob_1$Job.Start.Date), "%m/%d/%Y")
+# Should be 3,687,902 obs
+```
+
+Filtering out permits expired before 2019
+```{r}
+# Dataset represents permits that expired or afer Jan 1 2019 in order to cut down on the number of rows. This date was chosen because even if we decide on an "average" amout of construction, we will likely not want to include any construction projects that concluded before this date
+dob_2 <- dob_1 %>% 
+  filter(Expiration.Date >= as.Date("2019-01-01")) %>%
+  subset(select = -c(House.., Street.Name, Zip.Code, state))
+# Should be 111,454 obs
+```
+
+Getting addresses for rows with missing lat lon
+```{r, eval=FALSE}
+# This dataset has only unique addresses for rows with missing lat lon coordinates
+dob_address_missing <- dob_2 %>%
+  filter(is.na(LATITUDE)) %>%
+  subset(select = c(Address, BOROUGH)) %>%
+  distinct(Address, .keep_all = TRUE) %>%
+  mutate_geocode(Address)
+# Should be 125 obs
+
+# Writing to csv for safekeeping
+write.csv(dob_address_missing,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Raw/dob_address_missing.csv", row.names = FALSE)
+```
+
+Merging missing lat lon coordinates and getting final dataset
+```{r}
+dob_address_missing <- read.csv("dob_address_missing.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+
+dob_address_missing$Address <- as.character(dob_address_missing$Address)
+
+# Final dataset represents all permits not still in process that expired after Jan 1,  2019
+dob_clean <- dob_2 %>%
+  left_join(dob_address_missing, by = "Address") %>%
+  mutate(latitude = ifelse(!is.na(LATITUDE), LATITUDE, lat)) %>%
+  mutate(longitude = ifelse(!is.na(LONGITUDE), LONGITUDE, lon)) %>%
+  subset(select = -c(LATITUDE, LONGITUDE, BOROUGH.y, lon, lat))
+# Should be 111,454 obs, 17 vars
+```
+
+```{r}
+head(dob_clean)
+```
+
+
+
+## Street construction
+
+Reading in the dataset
+```{r, eval=FALSE}
+# All "NULL" columns are ones I am sure we will not use
+street_raw <- read.csv("Street_Construction_Permits.csv", encoding="UTF-8", na.strings = "", row.names = NULL, colClasses=c("NULL", "NULL", "NULL", "NULL", "NULL", NA, "NULL", NA, "NULL", NA, "NULL", "NULL", NA, "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", NA, NA, NA, NA, NA, NA, NA, NA, "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL"))
+# Should be 10,304,935 obs and 12 vars
+```
+
+```{r}
+head(street_raw)
+```
+
+Transforming date columns so they can be filtered and dropping missing locations
+```{r}
+# Dataset is the same but drops missing locations that cannot be geocoded
+street_1 <- street_raw %>%
+  separate(col = PermitIssueDate, into = c("issue_date", "issue_time", "issue_AM_PM"), sep = "[ ]") %>%
+  separate(col = IssuedWorkStartDate, into = c("workstart_date", "workstart_time", "workstart_AM_PM", "workstart_del"), sep = "[ ]") %>%
+  separate(col = IssuedWorkEndDate, into = c("workend_date", "workend_time", "workend_AM_PM", "workend_del"), sep = "[ ]") %>%
+  drop_na(OnStreetName) %>%
+  mutate(State = "NY") %>%
+  unite(Address_from, OnStreetName, FromStreetName, BoroughName, State, sep = ", ", remove = "False") %>%
+  unite(Address_to, OnStreetName, ToStreetName, BoroughName, State, sep = ", ", remove = "False") %>%
+  subset(select = -c(workstart_del, workend_del, FromStreetName, ToStreetName, OnStreetName, State))
+
+street_1$issue_date <- as.Date(as.character(street_1$issue_date), "%m/%d/%Y")
+street_1$workstart_date <- as.Date(as.character(street_1$workstart_date), "%m/%d/%Y")
+street_1$workend_date <- as.Date(as.character(street_1$workend_date), "%m/%d/%Y")
+# Should be 9,998,603 obs
+```
+
+Filtering out permits ending 2019 and filtering out denied/cancelled/voided permits
+```{r}
+# Dataset represents accepted permits with end dates before Jan 1, 2019. This date was chosen because even if we decide to taken an "average" of construction by year, we will not need to take in account projects that stopped before this date
+street_2 <- street_1 %>%
+  filter(workend_date >= as.Date("2019-01-01")) %>%
+  filter(PermitStatusShortDesc == "CONFIRMATION REC'D" | PermitStatusShortDesc == "EMERGENCY" | PermitStatusShortDesc == "ISSUED & PRINTED" | PermitStatusShortDesc == "AMENDED AFTER ISSUE" | PermitStatusShortDesc == "EXTENDED & PRINTED") %>%
+  drop_na(workstart_date)
+# Should be 77,177 obs
+```
+
+Getting a database of addresses for geocoding and dropping duplicated locations
+```{r, eval=FALSE}
+# Dataset represents all unique addresses from the "from" and "to" categories
+street_addressonly <- street_2 %>%
+  subset(select = c(Address_from, Address_to, BoroughName)) %>%
+  mutate(id = row_number()) %>%
+  melt(id.vars = c("id", "BoroughName"), variable.name = "Address") %>%
+  distinct(value, .keep_all = TRUE)
+# Should be 34,048 obs
+
+# Exporting for geocoding 
+write.csv(street_addressonly,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Raw/street_address.csv", row.names = FALSE)
+```
+
+Reading in same dataset with geocoded addresses
+```{r}
+street_addressonly <- read.csv("street_total.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+# Should be 34,048 obs
+
+street_addressonly$Address <- as.character(street_addressonly$Address)
+```
+
+Merging "from" address coordinates to dataset
+```{r}
+# Same dataset as street_2, but with merged coordinates for "from" addresses
+street_3 <- street_2 %>%
+  left_join(street_addressonly, by = c("Address_from" = "Address")) %>%
+  mutate(point_match = row_number())
+
+street_3 <- rename(street_3, latitude_from = latitude)
+street_3 <- rename(street_3, longitude_from = longitude)
+# Should be 77,177 obs
+```
+
+Merging "to" address coordinates to dataset and finalizing clean dataset
+```{r}
+# Final dataset has permits by row, with 2 coordinates per row indicated where construction begins (from) and ends (to). These two sets of coordinates will be used to create a segment in the geospatial software
+street_clean <- street_3 %>%
+  left_join(street_addressonly, by = c("Address_to" = "Address")) %>%
+  subset(select = -c(BoroughName.y, id.x, Direction.x, Direction.y, id.y, issue_time, issue_AM_PM, workstart_time, workstart_AM_PM, workend_time, workend_AM_PM, BoroughName.x))
+
+street_clean <- rename(street_clean, latitude_to = latitude)
+street_clean <- rename(street_clean, longitude_to = longitude)
+# Should be 77,177 obs, and 16 vars
+```
+
+```{r}
+head(street_clean)
+```
+
+
+
+## Sidewalk Cafe Licenses
+
+Reading in the dataset
+```{r, eval=FALSE}
+cafe_raw <- read.csv("Sidewalk_Caf__Licenses_and_Applications.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+# Should be 1,121 obs
+```
+
+```{r}
+head(cafe_raw)
+```
+
+Subsetting and gettings date variables in order
+```{r}
+# This dataset will only contain licenses that were approved and issued
+cafe_1 <- cafe_raw %>%
+  subset(select = c(LIC_STATUS, SWC_TYPE, SWC_SQ_FT, SWC_TABLES, SWC_CHAIRS, LATITUDE, LONGITUDE, APP_STATUS, ISSUANCE, ISSUANCE_DD)) %>%
+  filter(ISSUANCE == "Issued") %>%
+  filter(APP_STATUS == "Application Review Completed") %>%
+  subset(select = -c(APP_STATUS, ISSUANCE))
+
+cafe_1$ISSUANCE_DD <- as.Date(as.character(cafe_1$ISSUANCE_DD), "%m/%d/%Y")
+# Should be 805 obs
+```
+
+Finalizing cleaned file for geospatial software
+```{r}
+# Dropping rows that are missing lat lon
+cafe_clean <- cafe_1 %>%
+  na.omit(LONGITUDE) %>%
+  na.omit(LATITUDE)
+# Should be 805 obs
+```
+
+Final cleaned file
+```{r}
+head(cafe_clean)
+```
+
+
+
+## Open Restaurant Applications
+
+Reading in the dataset
+```{r, eval=FALSE}
+open_raw <- read.csv("Open_Restaurant_Applications.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+# Should be 11,744
+```
+
+```{r}
+head(open_raw)
+```
+
+
+Subsetting and getting date variables in order
+```{r}
+# This dataset contains applications that were approved
+open_1 <- open_raw %>%
+  subset(select = c(Seating.Interest..Sidewalk.Roadway.Both., Sidewalk.Dimensions..Area., Roadway.Dimensions..Area., Approved.for.Sidewalk.Seating, Approved.for.Roadway.Seating, Qualify.Alcohol, Latitude, Longitude, Business.Address, Time.of.Submission)) %>%
+  mutate(flag = ifelse(Approved.for.Sidewalk.Seating == "no" & Approved.for.Roadway.Seating == "no", 1, 0)) %>%
+  filter(flag == 0) %>%
+  mutate(latlong = ifelse(is.na(Latitude) | is.na(Longitude), 1, 0)) %>%
+  separate(col = Time.of.Submission, into = c("date", "time", "AM_PM"), sep = "[ ]")
+
+open_1$date <- as.Date(as.character(open_1$date), "%m/%d/%Y")
+open_1$Business.Address <- as.character(open_1$Business.Address)
+# Should be 11,381 obs
+```
+
+Subsetting to get addresses for obs missing latlong and geocoding
+```{r, eval=FALSE}
+# This dataset contains only unique addresses for rows that were missing coordinates
+open_addressonly <- open_1 %>%
+  filter(latlong == 1) %>%
+  subset(select = c(Business.Address)) %>%
+  distinct(Business.Address, .keep_all = TRUE) %>%
+  mutate_geocode(Business.Address)
+# Should be 2,461 obs
+```
+
+Cleaning up geocoding and writing out file with obs that could not be geocoded for manual cleaning
+```{r, eval=FALSE}
+# This dataset contains addresses that were unable to be geocoded or were obviously incorrectly geocded
+open_addressonly_smallmerge <- open_addressonly %>%
+  mutate(flag_na = ifelse(is.na(lon) | is.na(lat), 1, 0)) %>%
+  mutate(flag_latlong = ifelse(lon < -75, 1, 0)) %>%
+  filter(flag_na == 1 | flag_latlong == 1) %>%
+  subset(select = c(Business.Address))
+
+write.csv(open_addressonly_smallmerge,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/open_address.csv", row.names = FALSE)
+# Should be 16 obs
+
+# Reading in file after doing a manual cleanup of addresses
+open_addressonly_smallmerge <- read.csv("open_address.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+
+open_addressonly_smallmerge$Business.Address <- as.character(open_addressonly_smallmerge$Business.Address)
+open_addressonly_smallmerge$Business.Address2 <- as.character(open_addressonly_smallmerge$Business.Address2)
+
+# Geocoding the final missed addresses
+open_addressonly_smallmerge %>% mutate_geocode(Business.Address2)
+# Should be 16 obs
+```
+
+Merging the geocoded addresses and exporting them for safekeeping
+```{r, eval=FALSE}
+# This dataset contains all unique correctly geocoded addresses
+open_addressonly_final <- open_addressonly %>%
+  left_join(open_addressonly_smallmerge, by = "Business.Address") %>%
+  mutate(lat = ifelse(!is.na(Business.Address2), lat.y, lat.x)) %>%
+  mutate(lon = ifelse(!is.na(Business.Address2), lon.y, lon.x)) %>%
+  subset(select = c(Business.Address, lat, lon))
+
+write.csv(open_addressonly_final,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Raw/open_addressfinal.csv", row.names = FALSE)
+# Should be 2,461 obs
+```
+
+Reading in finalized geocoded datasets
+```{r}
+# Again, dataset is all unique + correctly geocded restaurant addresses
+open_addressonly_final <- read.csv("open_addressfinal.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+
+open_addressonly_final$Business.Address <- as.character(open_addressonly_final$Business.Address)
+# Should be 2,461 obs
+```
+
+Merging the geocoded addresses with the final dataset
+```{r}
+# Dataset merges together all corrected lat lon coordinates with the original dataset
+open_2 <- open_1 %>%
+  left_join(open_addressonly_final, by = "Business.Address") %>%
+  mutate(latitude = ifelse(!is.na(Latitude), Latitude, lat)) %>%
+  mutate(longitude = ifelse(!is.na(Longitude), Latitude, lon)) %>%
+  mutate(sidewalk_dimensions = ifelse(!is.na(Sidewalk.Dimensions..Area.), Sidewalk.Dimensions..Area., 0)) %>%
+  mutate(roadway_dimensions = ifelse(!is.na(Roadway.Dimensions..Area.), Roadway.Dimensions..Area., 0)) %>%
+  mutate(total_dimensions = sidewalk_dimensions + roadway_dimensions) %>%
+  mutate(flag_both = ifelse(Approved.for.Sidewalk.Seating == "yes" & Approved.for.Roadway.Seating == "yes", 1, 0)) %>%
+  mutate(flag_sidewalk = ifelse(Approved.for.Sidewalk.Seating == "yes" & flag_both == 0, 1, 0)) %>%
+  mutate(flag_roadway = ifelse(Approved.for.Roadway.Seating == "yes" & flag_both == 0, 1, 0)) %>%
+  subset(select = c(Business.Address, latitude, longitude, date, Qualify.Alcohol, flag_both, flag_roadway, flag_sidewalk, total_dimensions))
+# Should be 11,381 obs
+```
+
+Final cleaning and subsetting for export
+```{r}
+open_2[open_2$flag_both == 1, "approved_area"] <- "both"
+open_2[open_2$flag_sidewalk == 1, "approved_area"] <- "sidewalk"
+open_2[open_2$flag_roadway == 1, "approved_area"] <- "roadway"
+
+# Final dataset contains only columns we want
+open_clean <- open_2 %>%
+  subset(select = c(Business.Address, latitude, longitude, date, Qualify.Alcohol, approved_area, total_dimensions))
+# Should be 11,381 obs and 7 variables
+```
+
+Final cleaned file
+```{r}
+head(open_clean)
+```
+
+
+
+## Vehicle Traffic Counts
+
+Reading in the dataset
+```{r, eval=FALSE}
+vehicle_raw <- read.csv("Traffic_Volume_Counts__2014-2019_.csv", encoding="UTF-8", na.strings = "", row.names = NULL)
+
+vehicle_raw$date <- as.Date(as.character(vehicle_raw$Date), "%m/%d/%Y")
+# Should be 27,289 obs and 32 variables
+```
+
+```{r}
+head(vehicle_raw)
+```
+
+Grouping by times slots so we have fewer to variables
+```{r}
+# This dataset just groups hourly columns together
+vehicle_1 <- vehicle_raw %>%
+  mutate(midnight_to_sevenam = X12.00.1.00.AM + X1.00.2.00AM + X2.00.3.00AM + X3.00.4.00AM + X4.00.5.00AM + X5.00.6.00AM + X6.00.7.00AM) %>%
+  mutate(sevenam_to_noon = X7.00.8.00AM + X8.00.9.00AM + X9.00.10.00AM + X10.00.11.00AM + X11.00.12.00PM) %>%
+  mutate(noon_to_sevenpm = X12.00.1.00PM + X1.00.2.00PM + X2.00.3.00PM + X3.00.4.00PM + X4.00.5.00PM + X5.00.6.00PM + X6.00.7.00PM) %>%
+  mutate(sevenpm_to_midnight = X7.00.8.00PM + X8.00.9.00PM + X9.00.10.00PM + X10.00.11.00PM + X11.00.12.00AM) %>%
+  mutate(sevenam_to_sevenpm = sevenam_to_noon + noon_to_sevenpm)
+# Should be 27,289
+```
+
+Grouping by segment ID and date and collapsing down to segment and date
+```{r}
+# Each row in this dataset represents one day at one location
+vehicle_2 <- vehicle_1 %>%
+  group_by(Segment.ID, date) %>%
+  mutate(sevenam_to_sevenpm_total = sum(sevenam_to_sevenpm)) %>%
+  mutate(sevenpm_to_midnight_total = sum(sevenpm_to_midnight)) %>%
+  mutate(noon_to_sevenpm_total = sum(noon_to_sevenpm)) %>%
+  mutate(sevenam_to_noon_total = sum(sevenam_to_noon)) %>%
+  mutate(midnight_to_sevenam_total = sum(midnight_to_sevenam)) %>%
+  ungroup() %>%
+  group_by(Segment.ID, date, sevenam_to_sevenpm_total, sevenpm_to_midnight_total, midnight_to_sevenam_total, sevenam_to_noon_total, noon_to_sevenpm_total) %>%
+  summarise()
+# Should be 18,937 obs 7 vars
+```
+
+Getting averages per sample day and collapsing down so each row is a segment
+```{r}
+# Now each row is a now just a segment, with vehicle frequencies averaged across observation days. This repreents the actual number of observations we're working with
+vehicle_3 <- vehicle_2 %>%
+  group_by(Segment.ID) %>%
+  mutate(num_sample_day = n()) %>%
+  ungroup() %>%
+  group_by(Segment.ID) %>%
+  mutate(alldays_seventoseven = sum(sevenam_to_sevenpm_total)) %>%
+  mutate(alldays_sevenamtonoon = sum(sevenam_to_noon_total)) %>%
+  mutate(alldays_noontosevenpm = sum(noon_to_sevenpm_total)) %>%
+  mutate(alldays_sevenpmtomid = sum(sevenpm_to_midnight_total)) %>%
+  mutate(alldays_midtosevenam = sum(midnight_to_sevenam_total)) %>%
+  mutate(ave_seventoseven = alldays_seventoseven/num_sample_day) %>%
+  mutate(ave_sevenamtonoon = alldays_sevenamtonoon/num_sample_day) %>%
+  mutate(ave_noontosevenpm = alldays_noontosevenpm/num_sample_day) %>%
+  mutate(ave_sevenpmtomid = alldays_sevenpmtomid/num_sample_day) %>%
+  mutate(ave_midtosevenam = alldays_midtosevenam/num_sample_day) %>%
+  ungroup() %>%
+  group_by(Segment.ID, num_sample_day, ave_seventoseven, ave_sevenamtonoon, ave_noontosevenpm, ave_sevenpmtomid, ave_midtosevenam) %>%
+  summarise()
+# Should be 1,586 obs and 7 vars
+```
+
+Reading in adjusted segment data so we can join the gespatial tables later
+```{r, eval=FALSE}
+# We have to do this because the LION segments have leading zeros that make each number 7 digits, and we need an exact match with the zeros for the shapefile file
+
+vehicle_numadj <- read.csv("traffic_shapefile.csv", encoding="UTF-8", na.strings = "", row.names = NULL, colClasses=c("character", NA))
+# This file contains all the LION segments from the shapefile that we will be matching on
+
+colnames(vehicle_numadj)[1] <- "segmentid"
+colnames(vehicle_numadj)[2] <- "Segment.ID"
+
+vehicle_numadj <- vehicle_numadj %>% distinct(segmentid, .keep_all = TRUE)
+# Should be 208,955 obs
+```
+
+Merging final cleaned datasets to use for geospatial analysis
+```{r, eval=FALSE}
+# Here we are matching the leading zero version of the LION segments from the shapefile to the vehicle data
+vehicle_4 <- vehicle_3 %>%
+  left_join(vehicle_numadj, by = "Segment.ID")
+# Should be 1,586 obs
+
+# All the rows that matched successfully
+vehicle_4_large <- vehicle_4 %>%
+  filter(!is.na(segmentid)) %>%
+  ungroup()
+# Should be 1,486 obs
+
+# Reading back in rows that failed to match. These will get manually geocoded as point data since they can't be matched to the segements
+vehicle_4_small <- read.csv("vehicle_4_small.csv", encoding="UTF-8", na.strings = "", row.names = NULL, colClasses=c(NA, NA, NA, NA, NA, NA, NA, "character"))
+# Should be 100 obs
+
+# Stacking the final dataset together
+vehicle_clean <- rbind(vehicle_4_large, vehicle_4_small)
+# Should be 1,586 obs again
+```
+
+Final clean dataset
+```{r}
+head(vehicle_clean)
+```
+
+
+
+## Writing clean files to csv for easy import to GIS software later
+
+```{r, eval=FALSE}
+# 311 Complaint clean file
+write.csv(complaint_clean,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/complaint_clean.csv", row.names = FALSE)
+
+# Dept of Building permits clean file
+write.csv(dob_clean,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/dob_clean.csv", row.names = FALSE)
+
+# Street construction file clean file
+write.csv(street_clean,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/street_clean.csv", row.names = FALSE)
+
+# Sidewalk Cafe clean file
+write.csv(cafe_clean,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/cafe_clean.csv", row.names = FALSE)
+
+# Open restaurant applications clean file
+write.csv(open_clean,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/open_clean.csv", row.names = FALSE)
+
+# Vehicle traffic count clean file
+write.csv(vehicle_clean,"C:/Users/pantalaimon/Documents/Grants/DxD2020/Data/Clean/vehicle_clean.csv", row.names = FALSE)
+```
+
+
